@@ -1,11 +1,11 @@
 use clap::{Parser, ValueEnum};
 use eyre::{eyre, Result, WrapErr};
 use globset::Glob;
-use jwalk::WalkDir;
+use rayon::prelude::*;
 use size::{Base, Size, Style};
 use std::ffi::OsString;
-use std::fs::{canonicalize, symlink_metadata};
-use std::path::Path;
+use std::fs::{canonicalize, read_dir, symlink_metadata, ReadDir, DirEntry, FileType};
+use std::path::PathBuf;
 
 const MEBIBYTE: u64 = 1024 * 1024;
 
@@ -59,7 +59,7 @@ struct LffArgs {
     sort_method: Option<SortMethod>,
 }
 
-fn path_is_hidden(file_path: &Path) -> bool {
+fn path_is_hidden(file_path: PathBuf) -> bool {
     match file_path.file_name() {
         Some(name) => match name.to_str() {
             Some(str_name) => str_name.starts_with('.'),
@@ -69,13 +69,13 @@ fn path_is_hidden(file_path: &Path) -> bool {
     }
 }
 
-fn handle_entry(file_path: &Path, args: &LffArgs) -> Result<LffFile> {
+fn handle_entry(file_path: PathBuf, args: &LffArgs) -> Result<LffFile> {
     let file_name: OsString = match args.absolute {
-        true => canonicalize(file_path)?.into_os_string(),
-        false => file_path.as_os_str().to_os_string(),
+        true => canonicalize(&file_path)?.into_os_string(),
+        false => file_path.clone().into_os_string(),
     };
     let file_extension: Option<OsString> = file_path.extension().map(|ext| ext.to_os_string());
-    let file_size: u64 = symlink_metadata(file_path)?.len();
+    let file_size: u64 = symlink_metadata(&file_path)?.len();
     let file_size_rep: String = match args.pretty {
         true => Size::from_bytes(file_size)
             .format()
@@ -98,16 +98,21 @@ fn handle_entry(file_path: &Path, args: &LffArgs) -> Result<LffFile> {
     })
 }
 
-fn handle_directory(directory: &Path, files_vec: &mut Vec<LffFile>, args: &LffArgs) -> Result<()> {
-    for entry_result in WalkDir::new(directory) {
+fn handle_directory(
+    directory: ReadDir,
+    files_vec: &mut Vec<LffFile>,
+    args: &LffArgs,
+) -> Result<()> {
+    for entry_result in directory {
         if let Some(lim) = args.limit {
             if args.sort_method.is_none() && files_vec.len() == lim {
                 break;
             }
         }
-        let entry = entry_result?;
-        let file_path: &Path = &entry.path();
-        if file_path.is_file() {
+        let entry: DirEntry = entry_result?;
+        let file_path: PathBuf = entry.path();
+        let entry_type: FileType = entry.file_type()?;
+        if entry_type.is_file() {
             let file: LffFile = handle_entry(file_path, args)?;
             let large_enough: bool = file.size as f64 / MEBIBYTE as f64 >= args.min_size_mib;
             let correct_ext: bool = match &args.extension {
@@ -131,6 +136,11 @@ fn handle_directory(directory: &Path, files_vec: &mut Vec<LffFile>, args: &LffAr
             if large_enough && correct_ext && correct_name && is_not_hidden {
                 files_vec.push(file);
             }
+        } else if entry_type.is_dir() {
+            match args.exclude_hidden {
+                true if path_is_hidden(file_path) => (),
+                _ => handle_directory(read_dir(&file_path)?, files_vec, args)?,
+            };
         }
     }
     Ok(())
@@ -139,14 +149,10 @@ fn handle_directory(directory: &Path, files_vec: &mut Vec<LffFile>, args: &LffAr
 fn run_finder(args: LffArgs) -> Result<()> {
     let mut files_vec: Vec<LffFile> = Vec::new();
 
-    let directory_path: &Path = Path::new(&args.directory);
-    if !directory_path.exists() {
-        return Err(eyre!(
-            "Supplied start directory does not exist: '{}'",
-            &args.directory
-        ));
-    }
-    handle_directory(directory_path, &mut files_vec, &args)?;
+    let directory: ReadDir = read_dir(&args.directory)
+        .wrap_err_with(|| format!("Invalid supplied start directory: '{}'", &args.directory))?;
+
+    handle_directory(directory, &mut files_vec, &args)?;
 
     let longest_size_rep: usize = match files_vec
         .iter()
@@ -189,6 +195,10 @@ fn main() -> Result<()> {
 
 /*
 TODOS
+Efficiency:
+- the path clone is bad (but removing only saves 1 or 2 ms)
+- the metadata/file size is 25ms alone
+- the recursion is the real issue - without it, lff runs in ~5 ms, du runs in ~95ms, and dust runs in ~60ms
 Benchmarking - use hyperfine
 Interactive mode, use ratatui, allow scrolling, deleting maybe, etc.
 Tests
@@ -196,3 +206,9 @@ Comments
 README
 GitHub actions - lint, test/coverage, build/package
  */
+
+// BENCHES
+// RECURSIVE
+// hyperfine --warmup 10 --runs 20 './target/release/lff -m 0 -s size -l 20 ~/Downloads' 'du -a ~/Downloads | sort -r -n | head -n 20' 'dust --skip-total -R -F -n 20 -r ~/Downloads/'
+// NOT RECURSIVE
+// hyperfine --warmup 10 --runs 20 './target/release/lff -m 0 -s size -l 20 ~/Downloads' 'du -s ~/Downloads/* | sort -r -n | head -n 20' 'dust --skip-total -R -F -n 20 -r -d 1 ~/Downloads/'
