@@ -7,5 +7,5 @@ edition = "2021"
 clap = { version = "4.5.4", features = ["derive"] }
 eyre = "0.6.12"
 globset = "0.4.14"
+jwalk = "0.8.1"
 size = "0.4.1"
-walkdir = "2.5.0"
