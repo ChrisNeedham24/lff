@@ -2,10 +2,10 @@ use clap::{Parser, ValueEnum};
 use eyre::{eyre, Result, WrapErr};
 use globset::Glob;
 use size::{Base, Size, Style};
-use walkdir::WalkDir;
 use std::ffi::OsString;
-use std::fs::{canonicalize, read_dir, symlink_metadata, ReadDir};
-use std::path::PathBuf;
+use std::fs::{canonicalize, symlink_metadata};
+use std::path::Path;
+use walkdir::WalkDir;
 
 const MEBIBYTE: u64 = 1024 * 1024;
 
@@ -59,7 +59,7 @@ struct LffArgs {
     sort_method: Option<SortMethod>,
 }
 
-fn path_is_hidden(file_path: PathBuf) -> bool {
+fn path_is_hidden(file_path: &Path) -> bool {
     match file_path.file_name() {
         Some(name) => match name.to_str() {
             Some(str_name) => str_name.starts_with('.'),
@@ -69,10 +69,10 @@ fn path_is_hidden(file_path: PathBuf) -> bool {
     }
 }
 
-fn handle_entry(file_path: PathBuf, args: &LffArgs) -> Result<LffFile> {
+fn handle_entry(file_path: &Path, args: &LffArgs) -> Result<LffFile> {
     let file_name: OsString = match args.absolute {
         true => canonicalize(&file_path)?.into_os_string(),
-        false => file_path.clone().into_os_string(),
+        false => file_path.as_os_str().to_os_string(),
     };
     let file_extension: Option<OsString> = file_path.extension().map(|ext| ext.to_os_string());
     let file_size: u64 = symlink_metadata(&file_path)?.len();
@@ -99,17 +99,18 @@ fn handle_entry(file_path: PathBuf, args: &LffArgs) -> Result<LffFile> {
 }
 
 fn handle_directory(
-    directory: ReadDir,
+    directory: &Path,
     files_vec: &mut Vec<LffFile>,
     args: &LffArgs,
 ) -> Result<()> {
-    for entry_result in directory {
+    for entry_result in WalkDir::new(directory) {
         if let Some(lim) = args.limit {
             if args.sort_method.is_none() && files_vec.len() == lim {
                 break;
             }
         }
-        let file_path: PathBuf = entry_result?.path();
+        let entry = entry_result?;
+        let file_path: &Path = entry.path();
         if file_path.is_file() {
             let file: LffFile = handle_entry(file_path, args)?;
             let large_enough: bool = file.size as f64 / MEBIBYTE as f64 >= args.min_size_mib;
@@ -134,12 +135,6 @@ fn handle_directory(
             if large_enough && correct_ext && correct_name && is_not_hidden {
                 files_vec.push(file);
             }
-        } else if file_path.is_dir() {
-            let directory: ReadDir = read_dir(&file_path)?;
-            match args.exclude_hidden {
-                true if path_is_hidden(file_path) => (),
-                _ => handle_directory(directory, files_vec, args)?,
-            };
         }
     }
     Ok(())
@@ -148,10 +143,14 @@ fn handle_directory(
 fn run_finder(args: LffArgs) -> Result<()> {
     let mut files_vec: Vec<LffFile> = Vec::new();
 
-    let directory: ReadDir = read_dir(&args.directory)
-        .wrap_err_with(|| format!("Invalid supplied start directory: '{}'", &args.directory))?;
-
-    handle_directory(directory, &mut files_vec, &args)?;
+    let directory_path: &Path = Path::new(&args.directory);
+    if !directory_path.exists() {
+        return Err(eyre!(
+            "Supplied start directory does not exist: '{}'",
+            &args.directory
+        ));
+    }
+    handle_directory(directory_path, &mut files_vec, &args)?;
 
     let longest_size_rep: usize = match files_vec
         .iter()
