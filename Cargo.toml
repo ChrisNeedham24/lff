@@ -7,4 +7,5 @@ edition = "2021"
 clap = { version = "4.5.4", features = ["derive"] }
 eyre = "0.6.12"
 globset = "0.4.14"
+rayon = "1.10.0"
 size = "0.4.1"

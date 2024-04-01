@@ -4,8 +4,8 @@ use globset::Glob;
 use rayon::prelude::*;
 use size::{Base, Size, Style};
 use std::ffi::OsString;
-use std::fs::{canonicalize, read_dir, symlink_metadata, ReadDir, DirEntry, FileType};
-use std::path::PathBuf;
+use std::fs::{canonicalize, read_dir, symlink_metadata, DirEntry, FileType, ReadDir};
+use std::path::{Path, PathBuf};
 
 const MEBIBYTE: u64 = 1024 * 1024;
 
@@ -59,7 +59,7 @@ struct LffArgs {
     sort_method: Option<SortMethod>,
 }
 
-fn path_is_hidden(file_path: PathBuf) -> bool {
+fn path_is_hidden(file_path: &Path) -> bool {
     match file_path.file_name() {
         Some(name) => match name.to_str() {
             Some(str_name) => str_name.starts_with('.'),
@@ -94,65 +94,67 @@ fn handle_entry(file_path: PathBuf, args: &LffArgs) -> Result<LffFile> {
         extension: file_extension,
         size: file_size,
         formatted_size: file_size_rep,
-        hidden: path_is_hidden(file_path),
+        hidden: path_is_hidden(&file_path),
     })
 }
 
-fn handle_directory(
-    directory: ReadDir,
-    files_vec: &mut Vec<LffFile>,
-    args: &LffArgs,
-) -> Result<()> {
-    for entry_result in directory {
-        if let Some(lim) = args.limit {
-            if args.sort_method.is_none() && files_vec.len() == lim {
-                break;
+fn handle_directory(directory: ReadDir, args: &LffArgs) -> Result<Vec<LffFile>> {
+    let files = directory
+        .into_iter()
+        .enumerate()
+        .par_bridge()
+        .flat_map(|(idx, entry_result)| {
+            if let Some(lim) = args.limit {
+                if args.sort_method.is_none() && idx >= lim {
+                    return vec![];
+                }
             }
-        }
-        let entry: DirEntry = entry_result?;
-        let file_path: PathBuf = entry.path();
-        let entry_type: FileType = entry.file_type()?;
-        if entry_type.is_file() {
-            let file: LffFile = handle_entry(file_path, args)?;
-            let large_enough: bool = file.size as f64 / MEBIBYTE as f64 >= args.min_size_mib;
-            let correct_ext: bool = match &args.extension {
-                Some(arg_ext) => match file.extension {
-                    Some(ref file_ext) => file_ext == arg_ext,
-                    None => false,
-                },
-                None => true,
-            };
-            let correct_name: bool = match &args.name_pattern {
-                Some(arg_np) => Glob::new(arg_np)
-                    .wrap_err_with(|| eyre!("Invalid glob from name pattern flag: '{arg_np}'"))?
-                    .compile_matcher()
-                    .is_match(&file.name),
-                None => true,
-            };
-            let is_not_hidden: bool = match &args.exclude_hidden {
-                true => !file.hidden,
-                false => true,
-            };
-            if large_enough && correct_ext && correct_name && is_not_hidden {
-                files_vec.push(file);
+            // TODO remove unwraps
+            let entry: DirEntry = entry_result.unwrap();
+            let file_path: PathBuf = entry.path();
+            let entry_type: FileType = entry.file_type().unwrap();
+            if entry_type.is_file() {
+                let file: LffFile = handle_entry(file_path, args).unwrap();
+                let large_enough: bool = file.size as f64 / MEBIBYTE as f64 >= args.min_size_mib;
+                let correct_ext: bool = match &args.extension {
+                    Some(arg_ext) => match file.extension {
+                        Some(ref file_ext) => file_ext == arg_ext,
+                        None => false,
+                    },
+                    None => true,
+                };
+                let correct_name: bool = match &args.name_pattern {
+                    Some(arg_np) => Glob::new(arg_np)
+                        .wrap_err_with(|| eyre!("Invalid glob from name pattern flag: '{arg_np}'"))
+                        .unwrap()
+                        .compile_matcher()
+                        .is_match(&file.name),
+                    None => true,
+                };
+                let is_not_hidden: bool = match &args.exclude_hidden {
+                    true => !file.hidden,
+                    false => true,
+                };
+                if large_enough && correct_ext && correct_name && is_not_hidden {
+                    return vec![file];
+                }
+            } else if entry_type.is_dir() {
+                match args.exclude_hidden {
+                    true if path_is_hidden(&file_path) => (),
+                    _ => return handle_directory(read_dir(&file_path).unwrap(), args).unwrap(),
+                };
             }
-        } else if entry_type.is_dir() {
-            match args.exclude_hidden {
-                true if path_is_hidden(file_path) => (),
-                _ => handle_directory(read_dir(&file_path)?, files_vec, args)?,
-            };
-        }
-    }
-    Ok(())
+            vec![]
+        })
+        .collect::<Vec<LffFile>>();
+    Ok(files)
 }
 
 fn run_finder(args: LffArgs) -> Result<()> {
-    let mut files_vec: Vec<LffFile> = Vec::new();
-
     let directory: ReadDir = read_dir(&args.directory)
         .wrap_err_with(|| format!("Invalid supplied start directory: '{}'", &args.directory))?;
 
-    handle_directory(directory, &mut files_vec, &args)?;
+    let mut files_vec: Vec<LffFile> = handle_directory(directory, &args)?;
 
     let longest_size_rep: usize = match files_vec
         .iter()
