@@ -1,9 +1,10 @@
 use clap::{Parser, ValueEnum};
+use eyre::{eyre, Result, WrapErr};
 use globset::Glob;
 use size::{Base, Size, Style};
+use walkdir::WalkDir;
 use std::ffi::OsString;
-use std::fs::{canonicalize, metadata, read_dir, DirEntry, Metadata, ReadDir};
-use std::io::Error as IOError;
+use std::fs::{canonicalize, read_dir, symlink_metadata, ReadDir};
 use std::path::PathBuf;
 
 const MEBIBYTE: u64 = 1024 * 1024;
@@ -58,10 +59,6 @@ struct LffArgs {
     sort_method: Option<SortMethod>,
 }
 
-fn io_panic(err: IOError) -> ! {
-    panic!("Error was: {}", err);
-}
-
 fn path_is_hidden(file_path: PathBuf) -> bool {
     match file_path.file_name() {
         Some(name) => match name.to_str() {
@@ -72,20 +69,13 @@ fn path_is_hidden(file_path: PathBuf) -> bool {
     }
 }
 
-fn handle_entry(file_path: PathBuf, args: &LffArgs) -> LffFile {
+fn handle_entry(file_path: PathBuf, args: &LffArgs) -> Result<LffFile> {
     let file_name: OsString = match args.absolute {
-        true => match canonicalize(&file_path) {
-            Ok(path) => path.into_os_string(),
-            Err(error) => io_panic(error),
-        },
+        true => canonicalize(&file_path)?.into_os_string(),
         false => file_path.clone().into_os_string(),
     };
     let file_extension: Option<OsString> = file_path.extension().map(|ext| ext.to_os_string());
-    let file_metadata: Metadata = match metadata(&file_path) {
-        Ok(metadata) => metadata,
-        Err(error) => io_panic(error),
-    };
-    let file_size: u64 = file_metadata.len();
+    let file_size: u64 = symlink_metadata(&file_path)?.len();
     let file_size_rep: String = match args.pretty {
         true => Size::from_bytes(file_size)
             .format()
@@ -99,24 +89,29 @@ fn handle_entry(file_path: PathBuf, args: &LffArgs) -> LffFile {
         false => file_size.to_string(),
     };
 
-    LffFile {
+    Ok(LffFile {
         name: file_name,
         extension: file_extension,
         size: file_size,
         formatted_size: file_size_rep,
         hidden: path_is_hidden(file_path),
-    }
+    })
 }
 
-fn handle_directory(directory: ReadDir, files_vec: &mut Vec<LffFile>, args: &LffArgs) {
+fn handle_directory(
+    directory: ReadDir,
+    files_vec: &mut Vec<LffFile>,
+    args: &LffArgs,
+) -> Result<()> {
     for entry_result in directory {
-        let entry: DirEntry = match entry_result {
-            Ok(entry) => entry,
-            Err(error) => io_panic(error),
-        };
-        let file_path: PathBuf = entry.path();
+        if let Some(lim) = args.limit {
+            if args.sort_method.is_none() && files_vec.len() == lim {
+                break;
+            }
+        }
+        let file_path: PathBuf = entry_result?.path();
         if file_path.is_file() {
-            let file: LffFile = handle_entry(file_path, args);
+            let file: LffFile = handle_entry(file_path, args)?;
             let large_enough: bool = file.size as f64 / MEBIBYTE as f64 >= args.min_size_mib;
             let correct_ext: bool = match &args.extension {
                 Some(arg_ext) => match file.extension {
@@ -126,10 +121,10 @@ fn handle_directory(directory: ReadDir, files_vec: &mut Vec<LffFile>, args: &Lff
                 None => true,
             };
             let correct_name: bool = match &args.name_pattern {
-                Some(arg_np) => match Glob::new(arg_np) {
-                    Ok(glob) => glob.compile_matcher().is_match(&file.name),
-                    Err(error) => panic!("Invalid glob: {}", error),
-                },
+                Some(arg_np) => Glob::new(arg_np)
+                    .wrap_err_with(|| eyre!("Invalid glob from name pattern flag: '{arg_np}'"))?
+                    .compile_matcher()
+                    .is_match(&file.name),
                 None => true,
             };
             let is_not_hidden: bool = match &args.exclude_hidden {
@@ -140,26 +135,23 @@ fn handle_directory(directory: ReadDir, files_vec: &mut Vec<LffFile>, args: &Lff
                 files_vec.push(file);
             }
         } else if file_path.is_dir() {
-            match read_dir(&file_path) {
-                Ok(directory) => match args.exclude_hidden {
-                    true if path_is_hidden(file_path) => (),
-                    _ => handle_directory(directory, files_vec, args),
-                },
-                Err(error) => io_panic(error),
+            let directory: ReadDir = read_dir(&file_path)?;
+            match args.exclude_hidden {
+                true if path_is_hidden(file_path) => (),
+                _ => handle_directory(directory, files_vec, args)?,
             };
         }
     }
+    Ok(())
 }
 
-fn run_finder(args: LffArgs) {
+fn run_finder(args: LffArgs) -> Result<()> {
     let mut files_vec: Vec<LffFile> = Vec::new();
 
-    let directory: ReadDir = match read_dir(&args.directory) {
-        Ok(directory) => directory,
-        Err(error) => io_panic(error),
-    };
+    let directory: ReadDir = read_dir(&args.directory)
+        .wrap_err_with(|| format!("Invalid supplied start directory: '{}'", &args.directory))?;
 
-    handle_directory(directory, &mut files_vec, &args);
+    handle_directory(directory, &mut files_vec, &args)?;
 
     let longest_size_rep: usize = match files_vec
         .iter()
@@ -190,24 +182,26 @@ fn run_finder(args: LffArgs) {
     } else {
         println!("No files found for the specified arguments!");
     }
+
+    Ok(())
 }
 
-fn main() {
+fn main() -> Result<()> {
     let args: LffArgs = LffArgs::parse();
-    run_finder(args);
+    run_finder(args)?;
+    Ok(())
 }
 
 /*
 TODOS
-Benchmarking
-Efficiency - the path clone is bad
-Tests
-Remove panic? - probably use anyhow instead
-Consider default flag values
-Add header using flags - e.g. 5 files larger than 50 MiB, sorted by name
+Efficiency:
+- the path clone is bad (but removing only saves 1 or 2 ms)
+- the metadata/file size is 25ms alone
+- the recursion is the real issue - without it, lff runs in ~5 ms, and du runs in ~95ms
+Benchmarking - use hyperfine
 Interactive mode, use ratatui, allow scrolling, deleting maybe, etc.
-Add formatting to prints - e.g. bold matches for name or extension
-Smart limiting - if there's no sort, return early
+Tests
+Comments
 README
-GitHub actions - lint, test, build/package
+GitHub actions - lint, test/coverage, build/package
  */
