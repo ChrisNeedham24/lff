@@ -109,7 +109,6 @@ fn handle_directory(directory: ReadDir, args: &LffArgs) -> Result<Vec<LffFile>> 
                     return vec![];
                 }
             }
-            // TODO remove unwraps
             let entry: DirEntry = entry_result.unwrap();
             let file_path: PathBuf = entry.path();
             let entry_type: FileType = entry.file_type().unwrap();
@@ -146,7 +145,7 @@ fn handle_directory(directory: ReadDir, args: &LffArgs) -> Result<Vec<LffFile>> 
             }
             vec![]
         })
-        .collect::<Vec<LffFile>>();
+        .collect();
     Ok(files)
 }
 
@@ -197,10 +196,8 @@ fn main() -> Result<()> {
 
 /*
 TODOS
-Efficiency:
-- the path clone is bad (but removing only saves 1 or 2 ms)
-- the metadata/file size is 25ms alone
-- the recursion is the real issue - without it, lff runs in ~5 ms, du runs in ~95ms, and dust runs in ~60ms
+Remove unwraps - look at implementing the collect trait or even a custom iterator
+Test glob before running
 Benchmarking - use hyperfine
 Interactive mode, use ratatui, allow scrolling, deleting maybe, etc.
 Tests
