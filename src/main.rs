@@ -139,10 +139,14 @@ fn handle_directory(directory: ReadDir, args: &LffArgs) -> Result<Vec<LffFile>> 
                     return Ok(vec![file]);
                 }
             } else if entry_type.is_dir() {
-                match args.exclude_hidden {
-                    true if path_is_hidden(&file_path) => (),
-                    _ => return handle_directory(read_dir(&file_path)?, args),
-                };
+                match read_dir(&file_path) {
+                    Ok(dir) => match args.exclude_hidden {
+                        true if path_is_hidden(&file_path) => (),
+                        _ => return handle_directory(dir, args),
+                    },
+                    // Just ignore directories we can't read.
+                    Err(_) => (),
+                }
             }
             Ok(vec![])
         })
@@ -198,15 +202,9 @@ fn main() -> Result<()> {
 
 /*
 TODOS
-Benchmarking - use hyperfine
 Comments
 README
 Tests
 GitHub actions - lint, test/coverage, build/package
 Interactive mode, use ratatui, allow scrolling, deleting maybe, etc.
- */
-
-/*
-Bench
-hyperfine --warmup 10 --runs 20 './target/release/lff -m 0 -s size -l 20 ~/Downloads' 'du -a ~/Downloads | sort -r -n | head -n 20' 'dust --skip-total -R -F -n 20 -r ~/Downloads/'
  */
