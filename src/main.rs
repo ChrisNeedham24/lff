@@ -99,21 +99,23 @@ fn handle_entry(file_path: PathBuf, args: &LffArgs) -> Result<LffFile> {
 }
 
 fn handle_directory(directory: ReadDir, args: &LffArgs) -> Result<Vec<LffFile>> {
-    let files = directory
+    let two_d_files: Result<Vec<Vec<LffFile>>> = directory
         .into_iter()
         .enumerate()
         .par_bridge()
-        .flat_map(|(idx, entry_result)| {
+        // Rayon doesn't play nice with flat_map() and then collecting with results, so we just use
+        // map() and flatten after.
+        .map(|(idx, entry_result)| {
             if let Some(lim) = args.limit {
                 if args.sort_method.is_none() && idx >= lim {
-                    return vec![];
+                    return Ok(vec![]);
                 }
             }
-            let entry: DirEntry = entry_result.unwrap();
+            let entry: DirEntry = entry_result?;
             let file_path: PathBuf = entry.path();
-            let entry_type: FileType = entry.file_type().unwrap();
+            let entry_type: FileType = entry.file_type()?;
             if entry_type.is_file() {
-                let file: LffFile = handle_entry(file_path, args).unwrap();
+                let file: LffFile = handle_entry(file_path, args)?;
                 let large_enough: bool = file.size as f64 / MEBIBYTE as f64 >= args.min_size_mib;
                 let correct_ext: bool = match &args.extension {
                     Some(arg_ext) => match file.extension {
@@ -124,8 +126,7 @@ fn handle_directory(directory: ReadDir, args: &LffArgs) -> Result<Vec<LffFile>> 
                 };
                 let correct_name: bool = match &args.name_pattern {
                     Some(arg_np) => Glob::new(arg_np)
-                        .wrap_err_with(|| eyre!("Invalid glob from name pattern flag: '{arg_np}'"))
-                        .unwrap()
+                        .wrap_err_with(|| eyre!("Invalid glob from name pattern flag: '{arg_np}'"))?
                         .compile_matcher()
                         .is_match(&file.name),
                     None => true,
@@ -135,18 +136,19 @@ fn handle_directory(directory: ReadDir, args: &LffArgs) -> Result<Vec<LffFile>> 
                     false => true,
                 };
                 if large_enough && correct_ext && correct_name && is_not_hidden {
-                    return vec![file];
+                    return Ok(vec![file]);
                 }
             } else if entry_type.is_dir() {
                 match args.exclude_hidden {
                     true if path_is_hidden(&file_path) => (),
-                    _ => return handle_directory(read_dir(&file_path).unwrap(), args).unwrap(),
+                    _ => return handle_directory(read_dir(&file_path)?, args),
                 };
             }
-            vec![]
+            Ok(vec![])
         })
         .collect();
-    Ok(files)
+    let flat_files: Vec<LffFile> = two_d_files?.into_iter().flatten().collect();
+    Ok(flat_files)
 }
 
 fn run_finder(args: LffArgs) -> Result<()> {
@@ -196,18 +198,15 @@ fn main() -> Result<()> {
 
 /*
 TODOS
-Remove unwraps - look at implementing the collect trait or even a custom iterator
-Test glob before running
 Benchmarking - use hyperfine
-Interactive mode, use ratatui, allow scrolling, deleting maybe, etc.
-Tests
 Comments
 README
+Tests
 GitHub actions - lint, test/coverage, build/package
+Interactive mode, use ratatui, allow scrolling, deleting maybe, etc.
  */
 
-// BENCHES
-// RECURSIVE
-// hyperfine --warmup 10 --runs 20 './target/release/lff -m 0 -s size -l 20 ~/Downloads' 'du -a ~/Downloads | sort -r -n | head -n 20' 'dust --skip-total -R -F -n 20 -r ~/Downloads/'
-// NOT RECURSIVE
-// hyperfine --warmup 10 --runs 20 './target/release/lff -m 0 -s size -l 20 ~/Downloads' 'du -s ~/Downloads/* | sort -r -n | head -n 20' 'dust --skip-total -R -F -n 20 -r -d 1 ~/Downloads/'
+/*
+Bench
+hyperfine --warmup 10 --runs 20 './target/release/lff -m 0 -s size -l 20 ~/Downloads' 'du -a ~/Downloads | sort -r -n | head -n 20' 'dust --skip-total -R -F -n 20 -r ~/Downloads/'
+ */
