@@ -278,7 +278,6 @@ fn main() -> Result<()> {
 
 /*
 TODOS
-README
 Tests
 GitHub actions - lint, test/coverage, build/package
 Interactive mode, use ratatui, allow scrolling, deleting maybe, etc.

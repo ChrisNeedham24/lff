@@ -2,6 +2,36 @@
 
 A fast and simple recursive 'large file finder', no pipes required.
 
+### Usage
+
+Run `lff -h/--help` or see below.
+
+```
+Usage: lff [OPTIONS] <DIRECTORY>
+
+Arguments:
+  <DIRECTORY>  The directory to begin searching in
+
+Options:
+  -a, --absolute                     Display absolute paths for files. Automatically true if the supplied directory isn't relative
+      --base-ten                     Whether to display file sizes in KB/MB/GB over KiB/MiB/GiB
+      --exclude-hidden               Exclude hidden files and directories
+  -e, --extension <EXTENSION>        Filter files by extension
+  -l, --limit <LIMIT>                Return a maximum of this many files
+  -m, --min-size-mib <MIN_SIZE_MIB>  The minimum size in MiB for displayed files, e.g. 10 = 10 MiB, 0.1 = 100 KiB [default: 50]
+  -n, --name-pattern <NAME_PATTERN>  Filter file names by glob patterns, e.g. *abc* will yield 1abc2.txt
+  -p, --pretty                       Pretty-prints file sizes
+  -s, --sort-method <SORT_METHOD>    How to sort found files [possible values: size, name]
+  -h, --help                         Print help
+  -V, --version                      Print version
+```
+
+**Hint**: to see all files in a directory, just pass `-m 0`.
+
+### Installation
+
+TBC
+
 ### Benchmarks
 
 These benchmarks are run using [hyperfine](https://github.com/sharkdp/hyperfine),
