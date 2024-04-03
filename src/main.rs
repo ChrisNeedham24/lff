@@ -24,6 +24,7 @@ enum SortMethod {
 ///
 /// The file's `formatted_size` refers to how it will be displayed in the output. Some examples
 /// include `1024`, `1 KiB`, or `1.02 KB`.
+#[derive(Debug)]
 struct LffFile {
     name: OsString,
     extension: Option<OsString>,
@@ -276,9 +277,92 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+    use eyre::Report;
+    use std::path::{Path, PathBuf};
+    use std::str::from_utf8_unchecked;
+    use crate::{handle_entry, LffArgs, LffFile, path_is_hidden};
+
+    const BASE_ARGS: LffArgs = LffArgs {
+        directory: String::new(),
+        absolute: false,
+        base_ten: false,
+        exclude_hidden: false,
+        extension: None,
+        limit: None,
+        min_size_mib: 0.0,
+        name_pattern: None,
+        pretty: false,
+        sort_method: None,
+    };
+
+    #[test]
+    fn test_hidden_paths() {
+        let visible_file: &Path = Path::new("test_resources/snow.txt");
+        let visible_dir: &Path = Path::new("test_resources/visible");
+        assert!(!path_is_hidden(visible_file));
+        assert!(!path_is_hidden(visible_dir));
+
+        let hidden_file: &Path = Path::new("test_resources/.hidden");
+        let hidden_dir: &Path = Path::new("test_resources/.hidden_dir");
+        assert!(path_is_hidden(hidden_file));
+        assert!(path_is_hidden(hidden_dir));
+
+        unsafe {
+            let invalid_bytes: Vec<u8> = vec![0, 159, 145, 160];
+            let non_utf8_path = Path::new(from_utf8_unchecked(&invalid_bytes));
+            assert!(!path_is_hidden(non_utf8_path));
+        }
+        let invalid_path: &Path = Path::new("test_resources/..");
+        assert!(!path_is_hidden(invalid_path));
+    }
+
+    #[test]
+    fn test_handle_entry() {
+        let test_file: PathBuf = Path::new("test_resources/snow.txt").to_path_buf();
+        let file: LffFile = handle_entry(test_file, &BASE_ARGS).unwrap();
+        assert_eq!("test_resources/snow.txt", file.name);
+        assert_eq!(Some(OsString::from("txt")), file.extension);
+        assert_eq!(544, file.size);
+        assert_eq!("544", file.formatted_size);
+        assert!(!file.hidden);
+    }
+
+    #[test]
+    fn test_handle_entry_absolute() {
+        let test_file: PathBuf = Path::new("test_resources/snow.txt").to_path_buf();
+        let test_args: &LffArgs = &LffArgs {
+            absolute: true,
+            ..BASE_ARGS
+        };
+
+        let file: LffFile = handle_entry(test_file, test_args).unwrap();
+        assert!(file.name.to_str().unwrap().ends_with("lff/test_resources/snow.txt"));
+    }
+
+    #[test]
+    fn test_handle_entry_absolute_invalid_path() {
+        let test_file: PathBuf = Path::new("test_resources/snow2.txt").to_path_buf();
+        let test_args: &LffArgs = &LffArgs {
+            absolute: true,
+            ..BASE_ARGS
+        };
+        let _: Report = handle_entry(test_file, test_args).unwrap_err();
+    }
+}
+
 /*
 TODOS
 Tests
 GitHub actions - lint, test/coverage, build/package
 Interactive mode, use ratatui, allow scrolling, deleting maybe, etc.
+Create GitHub issues for missing stuff:
+- highlighting of filters
+- glob performance
+- package manager bundling
+- stuff removed from TODOs in other commits
+- regex support
+- etc
  */
