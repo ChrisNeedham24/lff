@@ -43,7 +43,7 @@ struct LffArgs {
     /// Automatically true if the supplied directory isn't relative.
     #[arg(short, long)]
     absolute: bool,
-    /// Whether to display file sizes in KB/MB/GB over KiB/MiB/GiB.
+    /// Whether to display file sizes in KB/MB/GB over KiB/MiB/GiB when pretty-printing is enabled.
     #[arg(long)]
     base_ten: bool,
     /// Exclude hidden files and directories.
@@ -58,7 +58,7 @@ struct LffArgs {
     /// The minimum size in MiB for displayed files, e.g. 10 = 10 MiB, 0.1 = 100 KiB.
     #[arg(short, long, default_value_t = 50.0)]
     min_size_mib: f64,
-    /// Filter file names by glob patterns, e.g. *abc* will yield 1abc2.txt.
+    /// Filter file names by quoted glob patterns, e.g. '*abc*' will yield 1abc2.txt.
     #[arg(short, long)]
     name_pattern: Option<String>,
     /// Pretty-prints file sizes.
@@ -97,7 +97,9 @@ fn handle_entry(file_path: PathBuf, args: &LffArgs) -> Result<LffFile> {
     // The OsString representation of PathBufs is actually pretty good, so we can just use that no
     // matter what the absolute flag value is.
     let file_name: OsString = match args.absolute {
-        true => canonicalize(&file_path)?.into_os_string(),
+        true => canonicalize(&file_path)
+            .wrap_err_with(|| format!("Could not generate absolute path for {:?}", &file_path))?
+            .into_os_string(),
         // Yes, cloning isn't good, but it's an extremely minor performance hit in this case.
         false => file_path.clone().into_os_string(),
     };
@@ -106,7 +108,9 @@ fn handle_entry(file_path: PathBuf, args: &LffArgs) -> Result<LffFile> {
     // all the links around the filesystem - this improves performance somewhat. Some other tools in
     // this area use blocks() and then multiply by the block size to get the true file size, but
     // we're not overly concerned about that.
-    let file_size: u64 = symlink_metadata(&file_path)?.len();
+    let file_size: u64 = symlink_metadata(&file_path)
+        .wrap_err_with(|| format!("Could not retrieve metadata for {:?}", &file_path))?
+        .len();
     let file_size_rep: String = match args.pretty {
         true => Size::from_bytes(file_size)
             .format()
@@ -267,23 +271,28 @@ fn run_finder(args: LffArgs) -> Result<()> {
 }
 
 /// The main function of `lff`.
-///
-/// # Errors
-///
-/// - If there is an issue running `lff` in [run_finder].
 fn main() -> Result<()> {
     let args: LffArgs = LffArgs::parse();
-    run_finder(args)?;
+    match run_finder(args) {
+        Ok(..) => (),
+        Err(err) => {
+            eprintln!("Error: {}\n", err);
+            if let Some(src) = err.source() {
+                eprintln!("Caused by:\n    {}", src);
+            }
+        }
+    };
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
+    use crate::{handle_directory, handle_entry, path_is_hidden, LffArgs, LffFile, SortMethod};
     use eyre::Report;
+    use std::ffi::OsString;
+    use std::fs::{read_dir, ReadDir};
     use std::path::{Path, PathBuf};
     use std::str::from_utf8_unchecked;
-    use crate::{handle_entry, LffArgs, LffFile, path_is_hidden};
 
     const BASE_ARGS: LffArgs = LffArgs {
         directory: String::new(),
@@ -339,7 +348,11 @@ mod tests {
         };
 
         let file: LffFile = handle_entry(test_file, test_args).unwrap();
-        assert!(file.name.to_str().unwrap().ends_with("lff/test_resources/snow.txt"));
+        assert!(file
+            .name
+            .to_str()
+            .unwrap()
+            .ends_with("lff/test_resources/snow.txt"));
     }
 
     #[test]
@@ -349,7 +362,219 @@ mod tests {
             absolute: true,
             ..BASE_ARGS
         };
-        let _: Report = handle_entry(test_file, test_args).unwrap_err();
+        let canonicalize_error: Report = handle_entry(test_file, test_args).unwrap_err();
+        assert_eq!(
+            "Could not generate absolute path for \"test_resources/snow2.txt\"",
+            canonicalize_error.to_string()
+        );
+    }
+
+    #[test]
+    fn test_handle_entry_none_extension() {
+        let test_file_no_ext: PathBuf = Path::new("test_resources/LICENCE").to_path_buf();
+        let no_ext_file: LffFile = handle_entry(test_file_no_ext, &BASE_ARGS).unwrap();
+        assert_eq!(None, no_ext_file.extension);
+
+        let test_file_hidden: PathBuf = Path::new("test_resources/.hidden").to_path_buf();
+        let hidden_file: LffFile = handle_entry(test_file_hidden, &BASE_ARGS).unwrap();
+        assert_eq!(None, hidden_file.extension);
+    }
+
+    #[test]
+    fn test_handle_entry_metadata_invalid_path() {
+        let test_file: PathBuf = Path::new("test_resources/snow2.txt").to_path_buf();
+        let metadata_error: Report = handle_entry(test_file, &BASE_ARGS).unwrap_err();
+        assert_eq!(
+            "Could not retrieve metadata for \"test_resources/snow2.txt\"",
+            metadata_error.to_string()
+        );
+    }
+
+    #[test]
+    fn test_handle_entry_pretty() {
+        let test_file: PathBuf = Path::new("test_resources/.hidden_dir/spider.txt").to_path_buf();
+        let test_args: &LffArgs = &LffArgs {
+            pretty: true,
+            ..BASE_ARGS
+        };
+
+        let file: LffFile = handle_entry(test_file, test_args).unwrap();
+        assert_eq!("1.16 KiB", file.formatted_size);
+    }
+
+    #[test]
+    fn test_handle_entry_pretty_base_ten() {
+        let test_file: PathBuf = Path::new("test_resources/.hidden_dir/spider.txt").to_path_buf();
+        let test_args: &LffArgs = &LffArgs {
+            pretty: true,
+            base_ten: true,
+            ..BASE_ARGS
+        };
+
+        let file: LffFile = handle_entry(test_file, test_args).unwrap();
+        assert_eq!("1.18 KB", file.formatted_size);
+    }
+
+    #[test]
+    fn test_handle_entry_pretty_under_kilo() {
+        let test_file: PathBuf = Path::new("test_resources/snow.txt").to_path_buf();
+        let test_args: &LffArgs = &LffArgs {
+            pretty: true,
+            ..BASE_ARGS
+        };
+
+        let file: LffFile = handle_entry(test_file, test_args).unwrap();
+        assert_eq!("544 B", file.formatted_size);
+    }
+
+    #[test]
+    fn test_handle_entry_hidden() {
+        let test_file: PathBuf = Path::new("test_resources/.hidden").to_path_buf();
+        let file: LffFile = handle_entry(test_file, &BASE_ARGS).unwrap();
+        assert!(file.hidden);
+    }
+
+    #[test]
+    fn test_handle_directory() {
+        let test_dir: ReadDir = read_dir("test_resources").unwrap();
+        let mut files: Vec<LffFile> = handle_directory(test_dir, &BASE_ARGS).unwrap();
+        files.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(5, files.len());
+
+        let hidden_file: &LffFile = &files[0];
+        assert_eq!("test_resources/.hidden", hidden_file.name);
+        assert_eq!(None, hidden_file.extension);
+        assert_eq!(0, hidden_file.size);
+        assert_eq!("0", hidden_file.formatted_size);
+        assert!(hidden_file.hidden);
+
+        let spider_file: &LffFile = &files[1];
+        assert_eq!("test_resources/.hidden_dir/spider.txt", spider_file.name);
+        assert_eq!(Some(OsString::from("txt")), spider_file.extension);
+        assert_eq!(1183, spider_file.size);
+        assert_eq!("1183", spider_file.formatted_size);
+        assert!(!spider_file.hidden);
+
+        let licence_file: &LffFile = &files[2];
+        assert_eq!("test_resources/LICENCE", licence_file.name);
+        assert_eq!(None, licence_file.extension);
+        assert_eq!(27, licence_file.size);
+        assert_eq!("27", licence_file.formatted_size);
+        assert!(!licence_file.hidden);
+
+        let snow_file: &LffFile = &files[3];
+        assert_eq!("test_resources/snow.txt", snow_file.name);
+        assert_eq!(Some(OsString::from("txt")), snow_file.extension);
+        assert_eq!(544, snow_file.size);
+        assert_eq!("544", snow_file.formatted_size);
+        assert!(!snow_file.hidden);
+
+        let mud_file: &LffFile = &files[4];
+        assert_eq!("test_resources/visible/mud.md", mud_file.name);
+        assert_eq!(Some(OsString::from("md")), mud_file.extension);
+        assert_eq!(329, mud_file.size);
+        assert_eq!("329", mud_file.formatted_size);
+        assert!(!mud_file.hidden);
+    }
+
+    #[test]
+    fn test_handle_directory_limit_no_sort() {
+        let test_dir: ReadDir = read_dir("test_resources").unwrap();
+        let test_args: &LffArgs = &LffArgs {
+            limit: Some(1),
+            ..BASE_ARGS
+        };
+        let files: Vec<LffFile> = handle_directory(test_dir, test_args).unwrap();
+        assert_eq!(1, files.len());
+    }
+
+    #[test]
+    fn test_handle_directory_limit_with_sort() {
+        let test_dir: ReadDir = read_dir("test_resources").unwrap();
+        let test_args: &LffArgs = &LffArgs {
+            limit: Some(1),
+            sort_method: Some(SortMethod::Size),
+            ..BASE_ARGS
+        };
+        let files: Vec<LffFile> = handle_directory(test_dir, test_args).unwrap();
+        assert_eq!(5, files.len());
+    }
+
+    #[test]
+    fn test_handle_directory_min_size() {
+        let test_dir: ReadDir = read_dir("test_resources").unwrap();
+        let test_args: &LffArgs = &LffArgs {
+            min_size_mib: 0.001,
+            ..BASE_ARGS
+        };
+
+        let files: Vec<LffFile> = handle_directory(test_dir, test_args).unwrap();
+        assert_eq!(1, files.len());
+        let spider_file: &LffFile = &files[0];
+        assert_eq!("test_resources/.hidden_dir/spider.txt", spider_file.name);
+        assert_eq!(1183, spider_file.size);
+    }
+
+    #[test]
+    fn test_handle_directory_extension() {
+        let test_dir: ReadDir = read_dir("test_resources").unwrap();
+        let test_args: &LffArgs = &LffArgs {
+            extension: Some(OsString::from("md")),
+            ..BASE_ARGS
+        };
+
+        let files: Vec<LffFile> = handle_directory(test_dir, test_args).unwrap();
+        assert_eq!(1, files.len());
+        let mud_file: &LffFile = &files[0];
+        assert_eq!("test_resources/visible/mud.md", mud_file.name);
+        assert_eq!(Some(OsString::from("md")), mud_file.extension);
+    }
+
+    #[test]
+    fn test_handle_directory_name_pattern() {
+        let test_dir: ReadDir = read_dir("test_resources").unwrap();
+        let test_args: &LffArgs = &LffArgs {
+            name_pattern: Some(String::from("*no*")),
+            ..BASE_ARGS
+        };
+
+        let files: Vec<LffFile> = handle_directory(test_dir, test_args).unwrap();
+        assert_eq!(1, files.len());
+        let snow_file: &LffFile = &files[0];
+        assert_eq!("test_resources/snow.txt", snow_file.name);
+    }
+
+    #[test]
+    fn test_handle_directory_invalid_name_pattern() {
+        let test_dir: ReadDir = read_dir("test_resources").unwrap();
+        let test_args: &LffArgs = &LffArgs {
+            name_pattern: Some(String::from("[")),
+            ..BASE_ARGS
+        };
+        let new_glob_error: Report = handle_directory(test_dir, test_args).unwrap_err();
+        assert_eq!(
+            "Invalid glob from name pattern flag: '['",
+            new_glob_error.to_string()
+        );
+    }
+
+    #[test]
+    fn test_handle_directory_exclude_hidden() {
+        let test_dir: ReadDir = read_dir("test_resources").unwrap();
+        let test_args: &LffArgs = &LffArgs {
+            exclude_hidden: true,
+            // This pattern would match .hidden_dir/spider.txt, visible/mud.md, and .hidden, but
+            // since we're excluding hidden files and directories, we only expect mud.md to be
+            // yielded.
+            name_pattern: Some(String::from("*d*")),
+            ..BASE_ARGS
+        };
+
+        let files: Vec<LffFile> = handle_directory(test_dir, test_args).unwrap();
+        assert_eq!(1, files.len());
+        let mud_file: &LffFile = &files[0];
+        assert_eq!("test_resources/visible/mud.md", mud_file.name);
+        assert_eq!(Some(OsString::from("md")), mud_file.extension);
     }
 }
 
