@@ -15,8 +15,8 @@ const MEBIBYTE: u64 = 1024 * 1024;
 // The message to return when no files are found matching the supplied arguments.
 const NO_FILES_FOUND_STR: &str = "No files found for the specified arguments!";
 
-/// The ways in which displayed files can be sorted. Derives ValueEnum and Clone so that it can be
-/// used as a type for the clap command-line arguments.
+/// The ways in which displayed files can be sorted. Derives `ValueEnum` and `Clone` so that it can
+/// be used as a type for the clap command-line arguments.
 #[derive(ValueEnum, Clone)]
 enum SortMethod {
     Size,
@@ -84,6 +84,7 @@ impl EyreHandler for LffEyreHandler {
     ///
     /// # Errors
     /// - If there is an issue writing to the supplied formatter.
+    #[cfg(not(tarpaulin_include))]
     fn debug(&self, error: &(dyn StdError + 'static), f: &mut Formatter<'_>) -> FmtResult {
         writeln!(f, "{}\n", error)?;
         if let Some(src) = error.source() {
@@ -107,6 +108,7 @@ struct LffStdoutPrinter;
 /// The implementation of our printer trait for the standard printer used in the business logic.
 impl LffPrinter for LffStdoutPrinter {
     /// Prints the given `String` value using the `println!` macro.
+    #[cfg(not(tarpaulin_include))]
     fn println(&mut self, value: String) {
         println!("{}", value);
     }
@@ -315,6 +317,9 @@ fn run_finder(args: LffArgs, printer: &mut dyn LffPrinter) -> Result<()> {
     Ok(())
 }
 
+/// Runs the [run_finder] function with the supplied `LffArgs` and an optionally-supplied
+/// `LffPrinter`. If one is not supplied, an `LffStdoutPrinter` is used - in effect providing a
+/// default argument for the [run_finder] function.
 macro_rules! run_finder {
     ($args: expr, $printer: expr) => {
         run_finder($args, $printer)
@@ -329,6 +334,7 @@ macro_rules! run_finder {
 /// # Errors
 /// - If there is an issue setting our custom eyre handler.
 /// - If there is an issue running the finder in [run_finder].
+#[cfg(not(tarpaulin_include))]
 fn main() -> Result<()> {
     // Set the eyre handler to be our custom one before running the finder.
     eyre::set_hook(Box::new(|_| Box::new(LffEyreHandler)))?;
@@ -336,11 +342,22 @@ fn main() -> Result<()> {
     run_finder!(args)
 }
 
+/// A few functions are excluded from coverage collection:
+/// - [LffEyreHandler::debug]: This is actually tested in [test_lff_eyre_handler], but is excluded
+///   due to the fact that the test must run in isolation. This is because if other tests run before
+///   it, eyre installs its standard handler, not our custom one, resulting in an error when the
+///   test runs.
+/// - [LffStdoutPrinter::println]: We cannot test values being printed to standard out, so this
+///   function is excluded.
+/// - [main]: Since the main function only consists of setting up eyre - which is tested elsewhere -
+///   and parsing command-line arguments before running the finder, there is no need to test this.
+///   Indeed, running the main function in a test results in errors because clap attempts to parse
+///   the command-line arguments that are passed to `cargo test`.
 #[cfg(test)]
 mod tests {
     use crate::{
-        handle_directory, handle_entry, path_is_hidden, run_finder, LffArgs, LffFile, LffPrinter,
-        SortMethod, NO_FILES_FOUND_STR,
+        handle_directory, handle_entry, path_is_hidden, run_finder, LffArgs, LffEyreHandler,
+        LffFile, LffPrinter, LffStdoutPrinter, SortMethod, NO_FILES_FOUND_STR,
     };
     use eyre::Report;
     use std::ffi::OsString;
@@ -361,15 +378,50 @@ mod tests {
         sort_method: None,
     };
 
+    /// A test printer that records 'printed' output in a `Vec`. Derives `Default` for convenience's
+    /// sake when instantiating test instances.
     #[derive(Default)]
     struct LffTestPrinter(Vec<String>);
 
+    /// The implementation of our printer trait for the test printer.
     impl LffPrinter for LffTestPrinter {
+        /// Record the value in the printer's `Vec`, rather than printing it, so we can assert on it
+        /// later.
         fn println(&mut self, value: String) {
             self.0.push(value);
         }
     }
 
+    /// Ensure that our custom eyre handler correctly formats returned errors.
+    ///
+    /// This test is ignored by default because it needs to run in isolation - in cases where it is
+    /// run after other tests, eyre will have already installed its default handler, resulting in an
+    /// error when this test attempts to install our custom one.
+    #[test]
+    #[ignore]
+    fn test_lff_eyre_handler() {
+        // Install our custom handler in the same way as the main function.
+        eyre::set_hook(Box::new(|_| Box::new(LffEyreHandler))).unwrap();
+
+        let test_dir: ReadDir = read_dir("test_resources").unwrap();
+        // We pass an invalid glob as an argument so that we can get a consistent error that will
+        // not vary based on operating system - unlike a file not found error, for example.
+        let test_args: &LffArgs = &LffArgs {
+            name_pattern: Some(String::from("[")),
+            ..BASE_ARGS
+        };
+
+        let test_error: Report = handle_directory(test_dir, test_args).unwrap_err();
+        // By formatting the Report like this, we directly call the debug function of our handler.
+        let formatted_error: String = format!("{:?}", test_error);
+        assert_eq!(
+            "Invalid glob from name pattern flag: '['\n\n\
+            Caused by:\n    error parsing glob '[': unclosed character class; missing ']'",
+            formatted_error
+        );
+    }
+
+    /// Ensure that the hidden status of paths is correctly determined.
     #[test]
     fn test_hidden_paths() {
         let visible_file: &Path = Path::new("test_resources/snow.txt");
@@ -382,15 +434,21 @@ mod tests {
         assert!(path_is_hidden(hidden_file));
         assert!(path_is_hidden(hidden_dir));
 
+        // In order to create a situation in which the to_str() call on the file name fails the
+        // UTF-8 validity check, we need to enter unsafe mode and create a Path from an invalid
+        // sequence of bytes. These bytes are taken directly from the documentation of the
+        // from_utf8() function, in the part documenting incorrect bytes.
         unsafe {
             let invalid_bytes: Vec<u8> = vec![0, 159, 145, 160];
-            let non_utf8_path = Path::new(from_utf8_unchecked(&invalid_bytes));
+            let non_utf8_path: &Path = Path::new(from_utf8_unchecked(&invalid_bytes));
             assert!(!path_is_hidden(non_utf8_path));
         }
+        // Since this is an invalid file name altogether, we expect this to not be hidden.
         let invalid_path: &Path = Path::new("test_resources/..");
         assert!(!path_is_hidden(invalid_path));
     }
 
+    /// Ensure that a file has the correct details extracted.
     #[test]
     fn test_handle_entry() {
         let test_file: PathBuf = Path::new("test_resources/snow.txt").to_path_buf();
@@ -402,6 +460,8 @@ mod tests {
         assert!(!file.hidden);
     }
 
+    /// Ensure that when handling an entry with the absolute flag, the correct file name is
+    /// extracted.
     #[test]
     fn test_handle_entry_absolute() {
         let test_file: PathBuf = Path::new("test_resources/snow.txt").to_path_buf();
@@ -415,9 +475,14 @@ mod tests {
             .name
             .to_str()
             .unwrap()
+            // Obviously the full absolute path will differ on different machines, but as long as
+            // the 'lff/' part of this path is there, we at least know that the path extends further
+            // back than the root directory of this repository.
             .ends_with("lff/test_resources/snow.txt"));
     }
 
+    /// Ensure that the correct error message is generated when an entry with an invalid path is
+    /// supplied, and the absolute flag is on.
     #[test]
     fn test_handle_entry_absolute_invalid_path() {
         let test_file: PathBuf = Path::new("test_resources/snow2.txt").to_path_buf();
@@ -432,6 +497,8 @@ mod tests {
         );
     }
 
+    /// Ensure that files with no extension and hidden files are both correctly determined to have
+    /// no extension.
     #[test]
     fn test_handle_entry_none_extension() {
         let test_file_no_ext: PathBuf = Path::new("test_resources/LICENCE").to_path_buf();
@@ -443,6 +510,8 @@ mod tests {
         assert_eq!(None, hidden_file.extension);
     }
 
+    /// Ensure that the correct error message is generated when an entry with an invalid path is
+    /// supplied.
     #[test]
     fn test_handle_entry_metadata_invalid_path() {
         let test_file: PathBuf = Path::new("test_resources/snow2.txt").to_path_buf();
@@ -453,6 +522,7 @@ mod tests {
         );
     }
 
+    /// Ensure that an entry's file size is of base 2 by default when the pretty flag is passed.
     #[test]
     fn test_handle_entry_pretty() {
         let test_file: PathBuf = Path::new("test_resources/.hidden_dir/spider.txt").to_path_buf();
@@ -465,6 +535,8 @@ mod tests {
         assert_eq!("1.16 KiB", file.formatted_size);
     }
 
+    /// Ensure that an entry's file size is of base 10 when both the pretty and base ten flags are
+    /// passed.
     #[test]
     fn test_handle_entry_pretty_base_ten() {
         let test_file: PathBuf = Path::new("test_resources/.hidden_dir/spider.txt").to_path_buf();
@@ -478,6 +550,7 @@ mod tests {
         assert_eq!("1.18 KB", file.formatted_size);
     }
 
+    /// Ensure that an entry's file size is of the abbreviated style when the pretty flag is passed.
     #[test]
     fn test_handle_entry_pretty_under_kilo() {
         let test_file: PathBuf = Path::new("test_resources/snow.txt").to_path_buf();
@@ -490,6 +563,7 @@ mod tests {
         assert_eq!("544 B", file.formatted_size);
     }
 
+    /// Ensure that hidden entries are correctly identified as such.
     #[test]
     fn test_handle_entry_hidden() {
         let test_file: PathBuf = Path::new("test_resources/.hidden").to_path_buf();
@@ -497,10 +571,14 @@ mod tests {
         assert!(file.hidden);
     }
 
+    /// Ensure that all of the files in the test directory have their details correctly extracted.
     #[test]
     fn test_handle_directory() {
         let test_dir: ReadDir = read_dir("test_resources").unwrap();
         let mut files: Vec<LffFile> = handle_directory(test_dir, &BASE_ARGS).unwrap();
+        // Since handle_directory() does no sorting in of itself, we need to manually sort the
+        // returned files in order for the test to be repeatable - the files are read in parallel,
+        // after all.
         files.sort_by(|a, b| a.name.cmp(&b.name));
         assert_eq!(5, files.len());
 
@@ -540,6 +618,8 @@ mod tests {
         assert!(!mud_file.hidden);
     }
 
+    /// Ensure that 'smart limiting' (early exit) is applied when handling a directory and the
+    /// limit flag is passed and no sort flag is passed.
     #[test]
     fn test_handle_directory_limit_no_sort() {
         let test_dir: ReadDir = read_dir("test_resources").unwrap();
@@ -551,6 +631,8 @@ mod tests {
         assert_eq!(1, files.len());
     }
 
+    /// Ensure that the limit flag is ignored when handling a directory and the sort flag is also
+    /// passed.
     #[test]
     fn test_handle_directory_limit_with_sort() {
         let test_dir: ReadDir = read_dir("test_resources").unwrap();
@@ -560,14 +642,17 @@ mod tests {
             ..BASE_ARGS
         };
         let files: Vec<LffFile> = handle_directory(test_dir, test_args).unwrap();
+        // Despite passing a limit of 1, we still get 5 files.
         assert_eq!(5, files.len());
     }
 
+    /// Ensure that the minimum size flag functions as expected.
     #[test]
     fn test_handle_directory_min_size() {
         let test_dir: ReadDir = read_dir("test_resources").unwrap();
         let test_args: &LffArgs = &LffArgs {
-            min_size_mib: 0.001,
+            // 1 MiB / 1024 = 1 KiB.
+            min_size_mib: 1.0 / 1024.0,
             ..BASE_ARGS
         };
 
@@ -575,9 +660,11 @@ mod tests {
         assert_eq!(1, files.len());
         let spider_file: &LffFile = &files[0];
         assert_eq!("test_resources/.hidden_dir/spider.txt", spider_file.name);
+        // We expect the one file returned to reach the size threshold.
         assert_eq!(1183, spider_file.size);
     }
 
+    /// Ensure that the extension filter flag functions as expected.
     #[test]
     fn test_handle_directory_extension() {
         let test_dir: ReadDir = read_dir("test_resources").unwrap();
@@ -590,9 +677,11 @@ mod tests {
         assert_eq!(1, files.len());
         let mud_file: &LffFile = &files[0];
         assert_eq!("test_resources/visible/mud.md", mud_file.name);
+        // We expect the one file returned to have the md extension.
         assert_eq!(Some(OsString::from("md")), mud_file.extension);
     }
 
+    /// Ensure that the name pattern filter flag functions as expected.
     #[test]
     fn test_handle_directory_name_pattern() {
         let test_dir: ReadDir = read_dir("test_resources").unwrap();
@@ -604,9 +693,12 @@ mod tests {
         let files: Vec<LffFile> = handle_directory(test_dir, test_args).unwrap();
         assert_eq!(1, files.len());
         let snow_file: &LffFile = &files[0];
+        // We expect the one file returned to match the *no* glob.
         assert_eq!("test_resources/snow.txt", snow_file.name);
     }
 
+    /// Ensure that the correct error message is generated when an invalid glob pattern is supplied
+    /// as the name pattern filter flag.
     #[test]
     fn test_handle_directory_invalid_name_pattern() {
         let test_dir: ReadDir = read_dir("test_resources").unwrap();
@@ -621,6 +713,8 @@ mod tests {
         );
     }
 
+    /// Ensure that the exclude hidden flag functions as expected, excluding both hidden files and
+    /// hidden directories.
     #[test]
     fn test_handle_directory_exclude_hidden() {
         let test_dir: ReadDir = read_dir("test_resources").unwrap();
@@ -636,47 +730,115 @@ mod tests {
         let files: Vec<LffFile> = handle_directory(test_dir, test_args).unwrap();
         assert_eq!(1, files.len());
         let mud_file: &LffFile = &files[0];
+        // We expect the one file returned to not be hidden.
         assert_eq!("test_resources/visible/mud.md", mud_file.name);
-        assert_eq!(Some(OsString::from("md")), mud_file.extension);
+        assert!(!mud_file.hidden);
     }
-    //
-    // #[test]
-    // fn test_print_output_no_files() {
-    //     let mut test_printer: LffTestPrinter = LffTestPrinter::default();
-    //     print_output(vec![], 10, &mut test_printer);
-    //     assert_eq!(NO_FILES_FOUND_STR, test_printer.0[0]);
-    // }
 
+    /// Ensure that when the finder is run, the expected formatted text is output.
     #[test]
     fn test_run_finder() {
         let test_args: LffArgs = LffArgs {
             directory: String::from("test_resources"),
+            // Sort by size for a repeatable test.
             sort_method: Some(SortMethod::Size),
             ..BASE_ARGS
         };
         let mut test_printer: LffTestPrinter = LffTestPrinter::default();
 
         run_finder!(test_args, &mut test_printer).unwrap();
-        assert_eq!("1183  \"test_resources/.hidden_dir/spider.txt\"", test_printer.0[0]);
+        // Check that the correct output has been 'printed'.
+        assert_eq!(5, test_printer.0.len());
+        assert_eq!(
+            "1183  \"test_resources/.hidden_dir/spider.txt\"",
+            test_printer.0[0]
+        );
         assert_eq!("544   \"test_resources/snow.txt\"", test_printer.0[1]);
         assert_eq!("329   \"test_resources/visible/mud.md\"", test_printer.0[2]);
         assert_eq!("27    \"test_resources/LICENCE\"", test_printer.0[3]);
         assert_eq!("0     \"test_resources/.hidden\"", test_printer.0[4]);
     }
 
+    /// Ensure that when the finder is run and sorted by name, the expected formatted text is
+    /// output.
+    #[test]
+    fn test_run_finder_sort_by_name() {
+        let test_args: LffArgs = LffArgs {
+            directory: String::from("test_resources"),
+            sort_method: Some(SortMethod::Name),
+            ..BASE_ARGS
+        };
+        let mut test_printer: LffTestPrinter = LffTestPrinter::default();
+
+        run_finder!(test_args, &mut test_printer).unwrap();
+        // Check that the correct output has been 'printed'.
+        assert_eq!(5, test_printer.0.len());
+        assert_eq!("0     \"test_resources/.hidden\"", test_printer.0[0]);
+        assert_eq!(
+            "1183  \"test_resources/.hidden_dir/spider.txt\"",
+            test_printer.0[1]
+        );
+        assert_eq!("27    \"test_resources/LICENCE\"", test_printer.0[2]);
+        assert_eq!("544   \"test_resources/snow.txt\"", test_printer.0[3]);
+        assert_eq!("329   \"test_resources/visible/mud.md\"", test_printer.0[4]);
+    }
+
+    /// Ensure that the limit flag functions correctly when running the finder in combination with
+    /// the sort flag.
+    #[test]
+    fn test_run_finder_limit() {
+        let test_args: LffArgs = LffArgs {
+            directory: String::from("test_resources"),
+            sort_method: Some(SortMethod::Size),
+            limit: Some(3),
+            ..BASE_ARGS
+        };
+        let mut test_printer: LffTestPrinter = LffTestPrinter::default();
+
+        run_finder!(test_args, &mut test_printer).unwrap();
+        // We expect only the three largest of the test files to have been output.
+        assert_eq!(3, test_printer.0.len());
+        assert_eq!(
+            "1183  \"test_resources/.hidden_dir/spider.txt\"",
+            test_printer.0[0]
+        );
+        assert_eq!("544   \"test_resources/snow.txt\"", test_printer.0[1]);
+        assert_eq!("329   \"test_resources/visible/mud.md\"", test_printer.0[2]);
+    }
+
+    /// Ensure that the correct message is output when no matching files are found.
+    #[test]
+    fn test_run_finder_no_files() {
+        let test_args: LffArgs = LffArgs {
+            directory: String::from("test_resources"),
+            // Naturally we don't have any test files at 100 MiB or more.
+            min_size_mib: 100.0,
+            ..BASE_ARGS
+        };
+        let mut test_printer: LffTestPrinter = LffTestPrinter::default();
+        run_finder!(test_args, &mut test_printer).unwrap();
+        // Check that the correct output has been 'printed'.
+        assert_eq!(NO_FILES_FOUND_STR, test_printer.0[0]);
+    }
+
+    /// Ensure that the correct error message is generated when the finder is run against a
+    /// non-existent directory.
     #[test]
     fn test_run_finder_invalid_dir() {
         let test_args: LffArgs = LffArgs {
             directory: String::from("this is not real"),
             ..BASE_ARGS
         };
-        
+        let dir_err: Report = run_finder!(test_args).unwrap_err();
+        assert_eq!(
+            "Invalid supplied start directory: 'this is not real'",
+            dir_err.to_string()
+        );
     }
 }
 
 /*
 TODOS
-Tests
 GitHub actions - lint, test/coverage, build/package
 Interactive mode, use ratatui, allow scrolling, deleting maybe, etc.
 Create GitHub issues for missing stuff:
