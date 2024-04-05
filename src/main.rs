@@ -1,14 +1,19 @@
 use clap::{Parser, ValueEnum};
-use eyre::{eyre, Result, WrapErr};
+use eyre::{eyre, EyreHandler, Result, WrapErr};
 use globset::Glob;
 use rayon::prelude::*;
 use size::{Base, Size, Style};
+use std::error::Error as StdError;
 use std::ffi::OsString;
+use std::fmt::{Formatter, Result as FmtResult};
 use std::fs::{canonicalize, read_dir, symlink_metadata, DirEntry, FileType, ReadDir};
 use std::path::{Path, PathBuf};
 
 // For convenience's sake, define the size of a mebibyte.
 const MEBIBYTE: u64 = 1024 * 1024;
+
+// The message to return when no files are found matching the supplied arguments.
+const NO_FILES_FOUND_STR: &str = "No files found for the specified arguments!";
 
 /// The ways in which displayed files can be sorted. Derives ValueEnum and Clone so that it can be
 /// used as a type for the clap command-line arguments.
@@ -67,6 +72,44 @@ struct LffArgs {
     /// How to sort found files.
     #[arg(short, long, value_enum)]
     sort_method: Option<SortMethod>,
+}
+
+/// A custom handler for eyre - we want to omit the location from returned errors.
+struct LffEyreHandler;
+
+/// The implementation of the EyreHandler trait for our custom eyre handler.
+impl EyreHandler for LffEyreHandler {
+    /// Defines the format for our custom handler - exactly the same as the standard format except
+    /// without the location.
+    ///
+    /// # Errors
+    /// - If there is an issue writing to the supplied formatter.
+    fn debug(&self, error: &(dyn StdError + 'static), f: &mut Formatter<'_>) -> FmtResult {
+        writeln!(f, "{}\n", error)?;
+        if let Some(src) = error.source() {
+            write!(f, "Caused by:\n    {}", src)?;
+        }
+        Ok(())
+    }
+}
+
+/// A custom printer trait - we define this in order to inject a printer dependency into our tests
+/// in order to test standard output.
+trait LffPrinter {
+    /// Prints the given `String` value - we maintain a reference to `self` so that the test
+    /// implementations of this trait can supply data structures to keep track of passed values.
+    fn println(&mut self, value: String);
+}
+
+/// The standard printer, printing straight to standard out.
+struct LffStdoutPrinter;
+
+/// The implementation of our printer trait for the standard printer used in the business logic.
+impl LffPrinter for LffStdoutPrinter {
+    /// Prints the given `String` value using the `println!` macro.
+    fn println(&mut self, value: String) {
+        println!("{}", value);
+    }
 }
 
 /// Returns whether the file at the supplied path is a hidden file, i.e. whether its name starts
@@ -229,7 +272,7 @@ fn handle_directory(directory: ReadDir, args: &LffArgs) -> Result<Vec<LffFile>> 
 ///
 /// - If the supplied start directory does not exist.
 /// - If there is an issue handling the directory in [handle_directory].
-fn run_finder(args: LffArgs) -> Result<()> {
+fn run_finder(args: LffArgs, printer: &mut dyn LffPrinter) -> Result<()> {
     let directory: ReadDir = read_dir(&args.directory)
         .wrap_err_with(|| format!("Invalid supplied start directory: '{}'", &args.directory))?;
 
@@ -255,39 +298,50 @@ fn run_finder(args: LffArgs) -> Result<()> {
     }
 
     if !files_vec.is_empty() {
+        // Print each of the given files to the supplied printer, padding the file size so that
+        // all of the file names are horizontally aligned.
         for file in &files_vec {
-            println!(
+            printer.println(format!(
                 "{:<width$}  {:?}",
                 file.formatted_size,
                 file.name,
                 width = longest_size_rep
-            );
+            ));
         }
     } else {
-        println!("No files found for the specified arguments!");
+        printer.println(String::from(NO_FILES_FOUND_STR));
     }
 
     Ok(())
 }
 
-/// The main function of `lff`.
-fn main() -> Result<()> {
-    let args: LffArgs = LffArgs::parse();
-    match run_finder(args) {
-        Ok(..) => (),
-        Err(err) => {
-            eprintln!("Error: {}\n", err);
-            if let Some(src) = err.source() {
-                eprintln!("Caused by:\n    {}", src);
-            }
-        }
+macro_rules! run_finder {
+    ($args: expr, $printer: expr) => {
+        run_finder($args, $printer)
     };
-    Ok(())
+    ($args: expr) => {
+        run_finder($args, &mut LffStdoutPrinter)
+    };
+}
+
+/// The main function of `lff`.
+///
+/// # Errors
+/// - If there is an issue setting our custom eyre handler.
+/// - If there is an issue running the finder in [run_finder].
+fn main() -> Result<()> {
+    // Set the eyre handler to be our custom one before running the finder.
+    eyre::set_hook(Box::new(|_| Box::new(LffEyreHandler)))?;
+    let args: LffArgs = LffArgs::parse();
+    run_finder!(args)
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{handle_directory, handle_entry, path_is_hidden, LffArgs, LffFile, SortMethod};
+    use crate::{
+        handle_directory, handle_entry, path_is_hidden, run_finder, LffArgs, LffFile, LffPrinter,
+        SortMethod, NO_FILES_FOUND_STR,
+    };
     use eyre::Report;
     use std::ffi::OsString;
     use std::fs::{read_dir, ReadDir};
@@ -306,6 +360,15 @@ mod tests {
         pretty: false,
         sort_method: None,
     };
+
+    #[derive(Default)]
+    struct LffTestPrinter(Vec<String>);
+
+    impl LffPrinter for LffTestPrinter {
+        fn println(&mut self, value: String) {
+            self.0.push(value);
+        }
+    }
 
     #[test]
     fn test_hidden_paths() {
@@ -575,6 +638,39 @@ mod tests {
         let mud_file: &LffFile = &files[0];
         assert_eq!("test_resources/visible/mud.md", mud_file.name);
         assert_eq!(Some(OsString::from("md")), mud_file.extension);
+    }
+    //
+    // #[test]
+    // fn test_print_output_no_files() {
+    //     let mut test_printer: LffTestPrinter = LffTestPrinter::default();
+    //     print_output(vec![], 10, &mut test_printer);
+    //     assert_eq!(NO_FILES_FOUND_STR, test_printer.0[0]);
+    // }
+
+    #[test]
+    fn test_run_finder() {
+        let test_args: LffArgs = LffArgs {
+            directory: String::from("test_resources"),
+            sort_method: Some(SortMethod::Size),
+            ..BASE_ARGS
+        };
+        let mut test_printer: LffTestPrinter = LffTestPrinter::default();
+
+        run_finder!(test_args, &mut test_printer).unwrap();
+        assert_eq!("1183  \"test_resources/.hidden_dir/spider.txt\"", test_printer.0[0]);
+        assert_eq!("544   \"test_resources/snow.txt\"", test_printer.0[1]);
+        assert_eq!("329   \"test_resources/visible/mud.md\"", test_printer.0[2]);
+        assert_eq!("27    \"test_resources/LICENCE\"", test_printer.0[3]);
+        assert_eq!("0     \"test_resources/.hidden\"", test_printer.0[4]);
+    }
+
+    #[test]
+    fn test_run_finder_invalid_dir() {
+        let test_args: LffArgs = LffArgs {
+            directory: String::from("this is not real"),
+            ..BASE_ARGS
+        };
+        
     }
 }
 
