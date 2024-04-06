@@ -20,7 +20,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: "clippy,rustfmt,tarpaulin"
+          components: "clippy,rustfmt"
       - name: Install Tarpaulin
         run: cargo install tarpaulin
       - name: Lint
