@@ -1,0 +1,26 @@
+name: Bundle
+
+on: workflow_dispatch
+
+jobs:
+  bundle:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build release
+        run: |
+          cargo build --release
+          chmod 744 target/release/lff
+          tar -czvf lff.tar.gz -C target/release/ lff
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lff
+          path: lff.tar.gz
