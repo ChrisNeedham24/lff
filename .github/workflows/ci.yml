@@ -21,6 +21,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: "clippy,rustfmt,tarpaulin"
+      - name: Install Tarpaulin
+        run: cargo install tarpaulin
       - name: Lint
         run: cargo clippy
       - name: Check formatting
