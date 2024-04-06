@@ -28,9 +28,29 @@ Options:
 
 **Hint**: to see all files in a directory, just pass `-m 0`.
 
-### Installation
+### Install from release
 
-TBC
+Begin by downloading the [latest release](https://github.com/ChrisNeedham24/lff/releases/latest) for your operating system.
+
+`lff` is currently published for macOS and Ubuntu, but support can be added for other Linux distros on request.
+In the interim, other distros should be able to install from source.
+
+With respect to architectures, `lff` is ARM-based on macOS and x86-based on Ubuntu.
+ARM-based releases for Ubuntu or other Linux distros can be similarly added on request.
+
+#### Installation steps:
+1. Extract the downloaded tarball using `tar -xzvf`.
+2. A binary will be extracted; copy this to your chosen binaries directory (e.g. `/usr/bin`, `/usr/local/bin`).
+3. You should now be able to run `lff` from any terminal.
+
+### Build from source
+
+In order to build from source, Rust and Cargo must be installed - [rustup](https://rustup.rs/) is usually the easiest way to do this.
+
+1. Clone the repository.
+2. Run `cargo build --release`.
+3. A binary will be generated at `target/release/lff`; copy this to your chosen binaries directory (e.g. `/usr/bin`, `/usr/local/bin`).
+4. You should now be able to run `lff` from any terminal.
 
 ### Benchmarks
 

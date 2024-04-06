@@ -836,16 +836,3 @@ mod tests {
         );
     }
 }
-
-/*
-TODOS
-GitHub actions - lint, test/coverage, build/package
-Interactive mode, use ratatui, allow scrolling, deleting maybe, etc.
-Create GitHub issues for missing stuff:
-- highlighting of filters
-- glob performance
-- package manager bundling
-- stuff removed from TODOs in other commits
-- regex support
-- etc
- */
