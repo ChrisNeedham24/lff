@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: "clippy,rustfmt,tarpaulin"
+      - name: Lint
+        run: cargo clippy
+      - name: Check formatting
+        run: rustfmt src/main.rs --check
+      - name: Test + Coverage
+        run: cargo tarpaulin --fail-under 100
+      - name: Test (ignored)
+        run: cargo test -- --ignored
